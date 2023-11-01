@@ -1,0 +1,269 @@
+---
+title: "Coding_Sample_1"
+author: "Martin Munoz"
+date: "2023-10-14"
+output: pdf_document
+fig.caption: yes
+keep_tex: yes
+header-includes: \usepackage{float}
+---
+### We will load a dataset that includes 50 observations for 16 variables. Each 
+### observation is indexed to a year. Observations track statistics for the  
+### Tour de France cycling race aggregated across all cyclists. 
+### There are 10 control variables that measure race statistics 
+### (e.g., winner time), 5 variables of interest that are all dummy variables 
+### that measure whether an anti-doping policy was in place, and 1 response 
+### variable that measures the percentage of total cyclists that tested positive 
+### for performance enhancing drugs ('ped_tot').
+```{r, message=FALSE}
+# loading dataset and packages
+library(glmnet)
+library(ggplot2)
+library(sandwich)
+library(lmtest)
+library(dplyr)
+library(reshape2)
+library(regclass)
+library(stargazer)
+library(ggfortify)
+library(hdnom)
+library(knitr)
+tdf <- read.csv("/Users/martrinmunoz/Desktop/EconPredoc/Writing Samples/TdF/tdf_cleaned.csv")
+```
+
+```{r}
+# Let's load a table showing summary statistics (e.g., median, mean, min, max)
+# for each variable.
+summary(tdf)
+# notice that the 'gen_ad' variable is constant throughout. This will create 
+# problems for our analysis, so let's drop it. Note that 'gen_ad' was not 
+# included in my description of the dataset above.
+vars_to_remove <- c('gen_ad_test')
+tdf <- tdf[, !(colnames(tdf) %in% vars_to_remove)]
+```
+
+
+```{r, results='asis'}
+# let's run a linear regression of ped_tot on all the predictor variables
+model1 <- lm(ped_tot ~., data = tdf)
+# let's display a summary of the unrestricted linear regression using the 
+# stargazer function. The summary will display coefficient estimates and the 
+# standard error in brackets next to the coefficient estimate. P-values are 
+# indicated with asteriks. Everything is rounded to 2 digits.
+stargazer(model1, type = 'latex', title = "Unrestricted OLS Regression", 
+header=FALSE, digits = 2, digits.extra = 10, intercept.bottom = FALSE, 
+single.row = TRUE, dep.var.labels   = "Percentage of cyclists 
+tested positive for PEDs", table.placement="H", 
+covariate.labels = c("Intercept", "Year", "Amphetamine Test",
+                     "EPO Test", "Biological Passport",
+                     "Night Test", "Out of Competition Testing",
+                     "Number of Stages", "Total Length", 
+                     "Average Speed", "Number of Entrants",
+                     "Number of Finishers", "First Prize Money", 
+                     "Total Prize Money", "Total Time Winner", 
+                     "Lag Time Between Winner and Runner Up"))
+```
+
+### There are two potential issues with the linear regression. Firstly, there 
+### may be multicollinearity between predictor variables and secondly there may 
+### be too many variables for the number of observations which could lead to 
+### overfitting. So let's examine whether there is multicollinearity. If there 
+### is, we may be able to drop some variables to prevent overfitting.
+```{r}
+# let's create a correlation matrix
+heatmap <- function(df, vars) {
+  cormat <- round(cor(na.omit(df)),2)
+  # set up hierarchical clustering
+  dd <- as.dist((1-cormat)/2)
+  hc <- hclust(dd)
+  cormat <- cormat[hc$order, hc$order]
+  # remove redundant information
+  cormat[lower.tri(cormat)] <- NA
+  # melt cormat
+  melted_cormat <- melt(cormat, na.rm = TRUE)
+  # create matrix
+  heat_plot <- ggplot(melted_cormat, aes(Var2, Var1, fill = value)) +
+    geom_tile(color = "white") +
+    scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                         midpoint = 0, limit = c(-1,1), space = "Lab",
+                         name = "Pearson\nCorrelation") +
+    theme_minimal() + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0, size = 7, 
+                                     hjust = 0),
+    axis.text.y = element_text(size = 7)) +
+    coord_fixed()
+    colnames(melted_cormat) <- c('Var1', 'Var2', 'correlation')
+    melted_cormat <- melted_cormat[order(melted_cormat$Var1),]
+    return(list(heat_plot = heat_plot, cormat = melted_cormat))
+}
+# create cormat for tdf dataset
+heatmap(df = tdf, vars = colnames(tdf))$heat_plot
+# Just a quick look at the correlation matrix indicates that there may be 
+# quite severe multicolinearity between some variables.
+
+# Now let's look at the Variable Inflation Factor for the unrestricted model
+VIF(model1)
+# looks like some of these independent variables have severe VIF (i.e., > 10), 
+# so let's see if we can drop any. First, notice that (i) total prize amount 
+# (tot_prize_amount) and first prize amount (first_prize_amount) and 
+# (ii) number of entrants (num_entrants) and number of finishers (num_finishers) 
+# are pairs of variables that are likely very highly correlated such that one of 
+# the pair can be dropped. Let's confirm this by printing their correlations 
+# below
+cor(tdf$tot_prize_money, tdf$first_prize_money)
+cor(tdf$num_entrants, tdf$num_finishers)
+# So we will drop one of the variables from each pair. I will drop the one with 
+# the higher VIF. Let's take a look at some other variables with very high VIF. 
+# Notice that year has a very high VIF. It will also be a problem if year is 
+# correlated with the variables of interest because then we will imprecisely 
+# estimate the coefficients on the variable of interest. Let's check if year is 
+# correlated with variables of interest.
+cor(tdf[-1], tdf$year)
+# so year is severely correlated with epo_test and ooct which are variables of 
+# interest. Given that year also has one of the highest VIFs we will drop that 
+# too. Finally, I will also drop avg_speed  since it was unclear how this 
+# was measured and it also has a high VIF. Let's remove the variables now
+model1_remove <- c('avg_speed', 'num_entrants', 'first_prize_money', 
+                   'tot_time_winner', 'year')
+tdf <- tdf[, !(colnames(tdf) %in% model1_remove)]
+```
+
+```{r}
+# let's run a linear regression on the restricted model
+model2 <- lm(ped_tot ~., data = tdf)
+# let's display a regular summary of this restricted OLS regression 
+# showing coefficient estimates, standard error, t-value, and P-values for 
+# all variables.
+summary(model2)
+# let's look at VIF of the restricted model
+VIF(model2)
+# the VIF values look much better. They are all under 10 now. Let's create a 
+# correlation matrix again and then list all the correlations between variables 
+# that are higher than |0.7|
+heatmap(df = tdf, vars = colnames(tdf))$heat_plot
+tdf_cor <- heatmap(df = tdf, vars = colnames(tdf))$cormat
+for(i in 1:nrow(tdf_cor)) {
+  if (abs(tdf_cor[i, 'correlation']) > 0.7 & 
+      tdf_cor[i, 'Var1'] != tdf_cor[i, 'Var2']) {
+    print(as.name(paste(' ', tdf_cor[i, 'Var1'], 'and', tdf_cor[i, 'Var2'],
+                        'have correlation', tdf_cor[i, 'correlation'])))
+  }
+}
+# looks like we have 0.78 cor between epo_test and ooct and 0.89 between 
+# bio_passport and ooct, which means that these coefficients could be 
+# imprecisely estimated. I will ignore this potential issue for now.
+# Let's do model diagnostics for the restricted model
+autoplot(model2)
+```
+```{r, results='asis'}
+# it appears that there is heteroskedasticity (non-horizontal line on bottom 
+# left plot), so let's get heteroskedastic robust standard errors using a 
+# function from the 'sandwich' library.
+se1 <- vcovHC(model2, type = "HC1")
+robust_se1 <- sqrt(diag(se1))
+# let's display a summary of the unrestricted linear regression using the 
+# stargazer function again.
+stargazer(model2, type = 'latex', title = "Restricted OLS Regression", 
+header=FALSE, se = list(NULL, robust_se1), digits = 2, digits.extra = 10, 
+intercept.bottom = FALSE, single.row = TRUE,
+dep.var.labels = "Percentage of cyclists tested positive for PEDs",
+table.placement="H", covariate.labels = c("Intercept", "Amphetamine Test",
+                                         "EPO Test", "Biological Passport",
+                                         "Night Test", "Out of Competition Testing",
+                                         "Number of Stages", "Total Length", 
+                                          "Number of Finishers", "Total Prize Money", 
+                                          "Lag Time Between Winner and Runner Up"))
+```
+
+
+```{r}
+# One issue with the OLS regression is that the dependent variable is bounded
+# between 0 and 1, which means the OLS regression might imprecisely estimate the
+# standard errors of coefficients and give predictions of the dependent variable
+# that are above 1 or below 0. This is less of an issue if most of the data from
+# the dependent variable is not close to the boundary, which is the case with
+# ped_tot as we can see from the summary statistic table below.
+summary(tdf$ped_tot)
+# Nevertheless, let's run a fractional logistic regression to cover our bases.
+# We will run the regression on the same set of variables that we used in the 
+# previous OLS regression.
+logistic1 <- glm(ped_tot~., data = tdf, family = quasibinomial('logit'))
+```
+```{r, results = 'asis'}
+# Let's also get standard error estimates that are heteroskedastic robust
+se2 <- vcovHC(logistic1, type="HC1")
+robust_se2 <- sqrt(diag(se2))
+# Let's print the results of the fractional logistic model in a table 
+# using stargazer.
+stargazer(logistic1, type = 'latex', title = "Fractional Logistic Regression", 
+header=FALSE, se = list(NULL, robust_se2), digits = 2, digits.extra = 10, 
+intercept.bottom = FALSE, single.row = TRUE,
+dep.var.labels = "Percentage of cyclists tested positive for PEDs",
+table.placement="H", covariate.labels = c("Intercept", "Amphetamine Test",
+                                         "EPO Test", "Biological Passport",
+                                         "Night Test", "Out of Competition Testing",
+                                         "Number of Stages", "Total Length", 
+                                          "Number of Finishers", "Total Prize Money", 
+                                         "Lag Time Between Winner and Runner Up"))
+```
+### Now let's take a different approach. Instead of choosing what predictor 
+### variables to include in our model, let's try an automatic method that 
+### selects predictor variables for us based on an algorithm. 
+### We will use LASSO to do this.
+```{r}
+# First we load the dataset again
+tdf <- read.csv("/Users/martrinmunoz/Desktop/EconPredoc/Writing Samples/TdF/tdf_cleaned.csv")
+#Let's remove the 'gen_ad' variable again
+vars_to_remove <- c('gen_ad_test')
+tdf <- tdf[, !(colnames(tdf) %in% vars_to_remove)]
+# Now we create a training set
+X_train <- model.matrix(ped_tot~., data = tdf)[,-1]
+Y_train <- tdf$ped_tot
+# We create a list that will store the mean-squared errors from cross-fold 
+# validation
+MSEs <- NULL
+# Now we run LASSO using 5-fold cross-validation and we use a for loop to repeat 
+# this algorithm 100 times to try and guard against the stochastic nature of the 
+# algorithm, which is especially a problem when the dataset is small as it is 
+# here. Since the dataset is small we also don't separate out a training and 
+# testing set. We just use the whole dataset to train the model. Alpha=1 
+# indicates that this is a LASSO regression. 
+# Each time the loop is run, we append MSEs to the MSE list. The LASSO algorithm 
+# estimates the lambda parameter that results in the lowest MSE. The lambda 
+# parameter is a penalty term that is used in generating the model.
+for (i in 1:100){
+  cv <- cv.glmnet(x = X_train, y = Y_train, alpha=1, nfolds=5, 
+                  standardize = TRUE)  
+  MSEs <- cbind(MSEs, cv$cvm)
+}
+# we name the rows of the MSE list based on the lambda estimated through the 
+# LASSO model
+rownames(MSEs) <- cv$lambda
+# finally, we choose the model based on the lambda 
+# that is the minimum lambda plus 1 standard error
+model3 <- coef(cv, s = cv$lambda.1se)
+# Note that we cannot immediately represent the object 'model3' through 
+# stargazer because it is a 'dgCMatrix' as the next line of code shows.
+class(model3)
+# It is possible to convert it into an object appropriate for Stargazer, but
+# this process is involved. Let's just present it in a nice table. First, we
+# convert the dgCMatrix object into a data frame.
+model3 <-data.frame(Variable_Name = model3@Dimnames[[1]][model3@i + 1], 
+                    Variable_Estimate = model3@x)
+# Let's rename the rows in the data frame
+model3[,1] <- c("Intercept", "Amphetamine Test", "EPO Test", "Biological Passport",
+                 "Night Test", "Out of Competition Testing", "Number of Stages",
+                 "Number of Finishers", "Total Prize Money", 
+                 "Lag Time Between Winner and Runner Up")
+# Let's also round the coefficient estimates to two significant figures
+model3[,2] <- signif(model3[,2],2)
+# Now we represent the data frame using the kable function from the knitr package.
+# We have two columns: one shows the name of the variable and the other shows the
+# coefficient estimate. Note that some variables are not included. This means 
+# they were dropped by the LASSO regression.
+knitr::kable(model3, caption = "LASSO Regression", format = "markdown",
+             digits = 10)
+```
+
+
+
